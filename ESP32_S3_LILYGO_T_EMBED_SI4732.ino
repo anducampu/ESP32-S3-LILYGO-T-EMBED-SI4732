@@ -68,6 +68,8 @@
 
 #include "Rotary.h"
 #include "patch_init.h" // SSB patch for whole SSBRX initialization string
+#define FASTLED_INTERNAL  // silence FastLED's pragma message
+#include <FastLED.h>
 
 const uint16_t size_content = sizeof ssb_patch_content; // see patch_init.h
 
@@ -97,6 +99,14 @@ const uint16_t size_content = sizeof ssb_patch_content; // see patch_init.h
 
 // Buttons controllers
 #define ENCODER_PUSH_BUTTON     0     // GPIO21
+
+// APA102 RGB LED ring around the encoder (T-Embed SI4732 pin map)
+#define APA102_DATA_PIN   42
+#define APA102_CLK_PIN    45
+#define APA102_NUM_LEDS    7
+
+// Screen-saver timeout: turn the backlight off after this much idle time
+#define SCREEN_TIMEOUT_MS 20000UL
 
 #define MIN_ELAPSED_TIME         5  //300
 #define MIN_ELAPSED_RSSI_TIME  200
@@ -330,6 +340,96 @@ TFT_eSprite spr = TFT_eSprite(&tft);
 
 SI4735 rx;
 
+// --- Screen timeout + APA102 LED ring state ---------------------------------
+// Physical-to-logical sort order for the 7-LED ring around the encoder, taken
+// from the LilyGO T-Embed factory example. leds[LED_SORT[i]] is the i-th LED
+// going around the ring.
+const uint8_t LED_SORT[APA102_NUM_LEDS] = {2, 1, 0, 6, 5, 4, 3};
+CRGB leds[APA102_NUM_LEDS];
+
+volatile unsigned long lastInteraction = 0;  // updated from main loop only
+bool   screenOn          = true;
+
+// LED-ring chase state. ledAnimStart is set only on transitions (idle->active
+// or direction change) so the comet position keeps advancing smoothly even
+// when encoder ticks come in faster than one step. ledLastActivity is bumped
+// on every tick and drives the stop timeout: the chase keeps running for one
+// full revolution past the last tick before turning off.
+bool          ledActive       = false;
+int8_t        ledDir          = 0;           // +1 = right/CW chase, -1 = left/CCW chase, 0 = idle
+unsigned long ledAnimStart    = 0;           // when the current chase began (free-running)
+unsigned long ledLastActivity = 0;           // when the last encoder tick arrived
+#define LED_STEP_MS 70U
+
+// Wake the screen and reset the idle timer. Call this from anywhere a user
+// interaction is detected (encoder rotation or button press).
+inline void noteInteraction()
+{
+  lastInteraction = millis();
+  if (!screenOn) {
+    ledcWrite(PIN_LCD_BL, 255);
+    screenOn = true;
+  }
+}
+
+void updateScreenTimeout()
+{
+  if (screenOn && (millis() - lastInteraction) > SCREEN_TIMEOUT_MS) {
+    ledcWrite(PIN_LCD_BL, 0);
+    screenOn = false;
+  }
+}
+
+// Note an encoder tick in direction `dir`. Cheap; safe to call every tick.
+// The animation start time is reset only when transitioning from idle or
+// reversing direction, so the chase position keeps free-running through
+// rapid ticks instead of restarting on every one.
+inline void triggerLedChase(int8_t dir)
+{
+  unsigned long now = millis();
+  ledLastActivity = now;
+  if (!ledActive || ledDir != dir) {
+    ledAnimStart = now;
+    ledDir       = dir;
+    ledActive    = true;
+  }
+}
+
+// Drive the LED ring. Call frequently from loop(); internally throttled.
+void updateLedRing()
+{
+  static unsigned long lastShow = 0;
+  unsigned long now = millis();
+  if ((now - lastShow) < 30) return;   // throttle to ~33 fps
+  lastShow = now;
+
+  if (!ledActive) return;              // idle: nothing to do, near-zero cost
+
+  // Keep animating for one full revolution past the last encoder tick. This
+  // lets the comet "complete the rotation" gracefully instead of cutting off
+  // mid-step, while a continuous fast spin just keeps it alive indefinitely.
+  const unsigned long ONE_REV_MS = LED_STEP_MS * (unsigned long)APA102_NUM_LEDS;
+  if ((now - ledLastActivity) > ONE_REV_MS) {
+    FastLED.clear(true);
+    ledActive = false;
+    ledDir    = 0;
+    return;
+  }
+
+  const int N = APA102_NUM_LEDS;
+  uint8_t step = ((now - ledAnimStart) / LED_STEP_MS) % N;
+  int pos    = (ledDir > 0) ? step : (N - 1 - step);
+  int trail1 = ((pos - ledDir)     % N + N) % N;
+  int trail2 = ((pos - 2 * ledDir) % N + N) % N;
+
+  FastLED.clear();
+  leds[LED_SORT[pos]]    = CRGB(0, 120, 0);   // head — bright green
+  leds[LED_SORT[trail1]] = CRGB(0,  35, 0);
+  leds[LED_SORT[trail2]] = CRGB(0,  10, 0);
+  FastLED.show();
+}
+// ---------------------------------------------------------------------------
+
 void setup()
 {
   Serial.begin(115200);
@@ -368,6 +468,14 @@ void setup()
   ledcAttach(PIN_LCD_BL, 2000, 8);
   ledcWrite(PIN_LCD_BL, 255);
   Serial.println("[BOOT] backlight on");
+
+  // APA102 LED ring
+  FastLED.addLeds<APA102, APA102_DATA_PIN, APA102_CLK_PIN, BGR>(leds, APA102_NUM_LEDS);
+  FastLED.setBrightness(22);
+  FastLED.clear(true);
+  Serial.println("[BOOT] APA102 ring init done");
+
+  lastInteraction = millis();
 
 /*  // Splash - Remove or change it for your introduction text.
   display.clearDisplay();
@@ -1484,6 +1592,8 @@ void loop()
   // Check if the encoder has moved.
   if (encoderCount != 0)
   {
+    noteInteraction();
+    triggerLedChase(encoderCount > 0 ? 1 : -1);
     if (bfoOn & (currentMode == LSB || currentMode == USB))
     {
       currentBFO = (encoderCount == 1) ? (currentBFO + currentBFOStep) : (currentBFO - currentBFOStep);
@@ -1530,6 +1640,7 @@ void loop()
   {
     if (digitalRead(ENCODER_PUSH_BUTTON) == LOW)
     {
+       noteInteraction();
        uint32_t timestamp = millis() + 3000;
         while (digitalRead(ENCODER_PUSH_BUTTON) == LOW ) { 
           if( millis() > timestamp){
@@ -1637,6 +1748,9 @@ void loop()
       itIsTimeToSave = false;
     }
   }
+
+  updateScreenTimeout();
+  updateLedRing();
 
   delay(5);
 }

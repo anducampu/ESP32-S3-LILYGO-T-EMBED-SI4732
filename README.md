@@ -45,6 +45,13 @@ version makes it work on core **3.x** and refines the UX:
   "FM Stereo" indicator are **green** instead of red.
 - **Boot diagnostics**: `Serial.begin(115200)` + boot prints in `setup()` so
   USB-CDC shows the boot flow and any crash trace.
+- **Screen timeout**: backlight dims off after 20 s of no encoder/button
+  activity; any interaction wakes it.
+- **APA102 LED ring** around the encoder (FastLED, 7 LEDs, GPIO 42 / 45) —
+  green comet sweeps clockwise on right-turn and counter-clockwise on
+  left-turn. Free-running animation so fast turning produces a smooth spin;
+  the comet finishes one full revolution after the last tick before going
+  dark. Brightness kept low (22/255) so it's a discreet indicator.
 
 ## Build & flash
 
@@ -68,6 +75,7 @@ esp32:esp32:esp32s3:PSRAM=opi,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUO
   strapping pin — pressing it during reset enters download mode)
 - SI4732 on I²C: SDA=GPIO18, SCL=GPIO8, RESET=GPIO16
 - Audio mute control: GPIO17
+- APA102 LED ring around encoder: data GPIO42, clock GPIO45, 7 LEDs
 
 ## Controls
 
