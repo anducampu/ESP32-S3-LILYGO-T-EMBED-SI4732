@@ -1,0 +1,15 @@
+# Claude Code session metadata — local only
+.claude/
+
+# Arduino IDE build artefacts
+build/
+*.bin
+*.elf
+*.map
+*.hex
+
+# Editor noise
+.vscode/
+.idea/
+*.swp
+*~
