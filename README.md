@@ -134,6 +134,12 @@ esp32:esp32:esp32s3:PSRAM=opi,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUO
 - **Double click** — Full menu (Volume, Step, Mode, BFO, BW, AGC/Att,
   SoftMute, Seek Up / Down, Band, Mute, CAT USB, CAT WiFi, WiFi Cfg,
   Reset Cfg). Defaults to Volume.
+- **Triple click** — **Volume straight away.** The second click opens the menu
+  on Volume and the third selects it, so the encoder is changing volume with no
+  further presses. It falls out of the click ladder rather than being a special
+  case: a click with the menu already open activates whatever is highlighted.
+  The clicks have to land inside the same window as a double click
+  (`ELAPSED_CLICK`, 1.5 s).
 
 `Reset Cfg` erases the stored receiver settings, the CAT preference and the saved
 WiFi networks, then restarts. It opens a confirmation with **Cancel** selected —
@@ -187,7 +193,7 @@ Double-click to open the menu. What each entry does, and where it applies:
 
 | Entry | Bands | What it does |
 |---|---|---|
-| **Volume** | all | Audio level, 0–63. |
+| **Volume** | all | Audio level, shown as 0–100 %. Triple-click the encoder to land here directly. |
 | **Step** | all | Tuning increment per detent. FM: 50/100/200 kHz (5, 10, 20 × 10 kHz). AM/SSB: 1, 5, 9, 10, 50, 100 kHz — **9 kHz** is the European MW channel raster, **10 kHz** the Americas'. |
 | **Mode** | **not FM** | Cycles AM → LSB → USB. Entering an SSB mode uploads the SSB patch to the DSP (a few hundred ms, "Loading SSB" appears); leaving it drops the patch. **Does nothing while the VHF band is selected** — the mode follows the band, so to reach AM from FM change *Band*, not Mode (any non-FM band selects AM automatically). |
 | **BFO** | **SSB only** | Fine tune in 10 Hz steps for zero-beating a voice or CW signal, on top of the coarse step. Shown as an offset; ignored in AM and FM. |
