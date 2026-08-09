@@ -10,7 +10,7 @@ libraries via the Arduino Library Manager.
 ## Environment used
 
 - Arduino IDE / arduino-cli
-- ESP32 Arduino core **3.3.8** (board package `esp32:esp32`)
+- ESP32 Arduino core **3.3.10** (board package `esp32:esp32`)
 - Libraries (current versions known to work):
   - TFT_eSPI 2.5.43
   - PU2CLR SI4735 2.1.8
@@ -20,7 +20,8 @@ libraries via the Arduino Library Manager.
   - RotaryEncoder 1.6.0
   - OneButton (mathertel)
   - Battery18650Stats (danilopinotti)
-  - FastLED 3.10.3  (drives the APA102 ring around the encoder)
+  - FastLED 3.10.5  (drives the APA102 ring around the encoder — see
+    `build_opt.h` in section 3, which this version makes necessary)
 
 Library paths below assume the Arduino sketchbook is `~/Arduino`. Adjust if
 yours lives elsewhere.
@@ -76,6 +77,21 @@ Nothing else in Setup210 needs to change.
 
 ## 3. Sketch-internal changes (already in this folder, listed for completeness)
 
+- **`build_opt.h` is part of the build, not a stray file.** It carries
+  `-DFASTLED_LOG_VERBOSITY=0`. FastLED 3.10.x logs its channel-driver
+  registration at runtime through `Serial`, from inside `FastLED.addLeds()` —
+  which is the USB CDC port the CAT transport owns, so without this every boot
+  injects ten lines of `ChannelManager: Added driver ...` into the CAT command
+  stream. It cannot be a `#define` in the `.ino`: Arduino compiles each library
+  into its own translation units, which never see the sketch's defines, so the
+  flag has to reach the whole build. Arduino IDE and `arduino-cli` both pick
+  `build_opt.h` up automatically from the sketch folder. Deleting it costs
+  76 KB of flash as well, because the same switch drops FL_WARN's string pool
+  from `.rodata`.
+- `CatControl.cpp` / `.h`, `WiFiPortal.cpp` / `.h`: the CAT remote-control
+  transports and the WiFi credential store / captive portal. No library patches
+  needed — they use `WiFi`, `WebServer`, `DNSServer`, `ESPmDNS` and
+  `Preferences` from the core as shipped.
 - `ESP32_S3_LILYGO_T_EMBED_SI4732.ino`: migrated LEDC API from core 2.x
   (`ledcSetup`/`ledcAttachPin`/`ledcWrite(channel,...)`) to core 3.x
   (`ledcAttach(pin,freq,res)`/`ledcWrite(pin,...)`).

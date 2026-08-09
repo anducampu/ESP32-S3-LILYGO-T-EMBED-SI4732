@@ -13,6 +13,9 @@ T-Display S3, with fixes and UX tweaks to make it work cleanly on the
   <sub>Photograph &copy; <a href="https://lilygo.cc/">LILYGO</a>, from the <a href="https://wiki.lilygo.cc/products/t-embed-series/t-embed-si4732/">T-Embed SI4732 wiki page</a>. Reproduced for identification; not covered by this repository's licence.</sub>
 </p>
 
+A shorter write-up, with the story behind the more interesting bugs, is at
+**[andu.ro/lilygo_t-embed_si4732_receiver](https://andu.ro/lilygo_t-embed_si4732_receiver/)**.
+
 ## Features
 
 - AM / FM / SW / LW reception with SSB (LSB / USB) demodulation
