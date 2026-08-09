@@ -102,4 +102,7 @@ void     catRadioTouched();                // a CAT set landed: refresh the UI
 // they exist so GPIO trouble can be measured over CAT instead of guessed at.
 void     catRadioDiag(char kind, char *out, size_t n);
 
+// "ZZW;" answers from a WiFi snapshot the loop publishes -- the CAT task must not
+// call into the WiFi stack itself. See CatNetSnap in the .cpp.
+
 #endif

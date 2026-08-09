@@ -3,6 +3,7 @@
 
 #include <WiFi.h>
 #include <Preferences.h>
+#include <esp_log.h>
 
 // These mirror the mode constants in the main sketch. The radio hooks speak in
 // them, so if the .ino ever renumbers FM/LSB/USB/AM, fix these too.
@@ -55,6 +56,30 @@ static CatSnapshot catSnapGet()
   c = snap;
   portEXIT_CRITICAL(&snapMux);
   return c;
+}
+
+// ------------------------------------------------------- network snapshot (ZZW;)
+// Same discipline as the radio snapshot above: the CAT task must not call into the
+// WiFi stack, so the loop publishes what ZZW; reports. Refreshed on a slow cadence --
+// none of it changes faster than a human can act, and netIP()/netSSID() allocate.
+struct CatNetSnap
+{
+  bool     en, sus, radio, portal;
+  uint8_t  state, creds;
+  uint16_t port;
+  char     ip[20];
+  char     ssid[33];
+};
+
+static CatNetSnap   netSnap;
+static portMUX_TYPE netSnapMux = portMUX_INITIALIZER_UNLOCKED;
+
+// An SSID is arbitrary bytes and the reply is ';'-framed, so a network named with a
+// semicolon would split the answer in two and desynchronise the client for good.
+static void catSanitise(char *p)
+{
+  for (; *p; p++)
+    if (*p < 0x20 || *p > 0x7E || *p == ';') *p = '.';
 }
 
 // ------------------------------------------------------------- set marshalling
@@ -205,6 +230,14 @@ static void applyUsbTxTimeout()
   // parking the loop the way the stock 100 ms would.
   Serial.setTxTimeoutMs(usbEnabled ? 10 : 100);
 #endif
+
+  // BOOTLOG_LN gates the sketch's own prints, but not the IDF's. esp_log writes to
+  // the same USB CDC port at runtime, so a driver message lands in the middle of a
+  // reply and splits the frame -- observed on hardware as
+  // "...port=1234;E (283531) wifi:sta is connecting, cannot set config" arriving as
+  // one CAT answer. Silence it while CAT owns the stream; restore the default when
+  // it does not, so the port is still useful for debugging.
+  esp_log_level_set("*", usbEnabled ? ESP_LOG_NONE : ESP_LOG_ERROR);
 }
 
 static void saveUsbEnabled()
@@ -463,6 +496,23 @@ static void catExecute(const char *cmd, CatChannel &ch, Stream &out)
   // ---- ZZ: local diagnostics (not Kenwood) -----------------------------
   if (!strncmp(cmd, "ZZ", 2))
   {
+    if (alen == 1 && arg[0] == 'W')
+    {
+      CatNetSnap n;
+      portENTER_CRITICAL(&netSnapMux);
+      n = netSnap;
+      portEXIT_CRITICAL(&netSnapMux);
+
+      static const char *stName[] = { "OFF", "CONNECTING", "CONNECTED", "PORTAL" };
+      char z[160];
+      snprintf(z, sizeof(z),
+               "ZZW en=%d sus=%d radio=%d state=%s portal=%d ip=%s ssid=%s creds=%u port=%u;",
+               n.en ? 1 : 0, n.sus ? 1 : 0, n.radio ? 1 : 0,
+               stName[n.state & 3], n.portal ? 1 : 0,
+               n.ip, n.ssid, (unsigned)n.creds, (unsigned)n.port);
+      catEmit(out, z);
+      return;
+    }
     if (alen == 1 && arg[0] == 'E')
     {
       char z[48];
@@ -878,6 +928,34 @@ void catStartTask()
   xTaskCreatePinnedToCore(catTaskFn, "cat", 8192, nullptr, 2, &catTaskH, 0);
 }
 
+// Published for ZZW;. Throttled: this is read by a human debugging, not by a poll
+// loop, and every call builds two Strings.
+static void catRefreshNetSnapshot()
+{
+  static uint32_t last = 0;
+  if (last && (millis() - last) < 500) return;
+  last = millis();
+
+  CatNetSnap n;
+  n.en     = netEnabled();
+  n.sus    = netSuspended();
+  n.radio  = netRadioOn();
+  n.portal = netPortalActive();
+  n.state  = (uint8_t)netGetState();
+  n.creds  = netCredCount();
+  n.port   = netGetCatPort();
+
+  String ip = netIP(), ss = netSSID();
+  strlcpy(n.ip,   ip.length() ? ip.c_str() : "-", sizeof(n.ip));
+  strlcpy(n.ssid, ss.length() ? ss.c_str() : "-", sizeof(n.ssid));
+  catSanitise(n.ip);
+  catSanitise(n.ssid);
+
+  portENTER_CRITICAL(&netSnapMux);
+  netSnap = n;
+  portEXIT_CRITICAL(&netSnapMux);
+}
+
 static void catRefreshSnapshot()
 {
   CatSnapshot c;
@@ -925,6 +1003,7 @@ void catServiceFromLoop()
   }
 
   catRefreshSnapshot();
+  catRefreshNetSnapshot();
 }
 
 bool catUsbGetEnabled() { return usbEnabled; }

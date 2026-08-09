@@ -287,7 +287,7 @@ Every command, and what to send:
 | `IF;` | query | 38-byte composite status: frequency, mode, VFO, RX/TX and the rest |
 | `RX;` | set | Silent success — already receiving |
 | `TX;` | set | `N;` — refused, this is a receiver |
-| `ZZB;` `ZZP;` `ZZN;` `ZZE;` | query | Diagnostics, see [below](#built-in-diagnostics) |
+| `ZZB;` `ZZP;` `ZZN;` `ZZE;` `ZZW;` | query | Diagnostics, see [below](#built-in-diagnostics) |
 
 Anything else: an unknown *query* gets `?;`, an unknown *set* gets silence. That
 asymmetry is deliberate and load-bearing — see
@@ -385,6 +385,19 @@ the SSID and address on a banner. The portal lists networks in range, stores up
 to **5** SSID/password pairs, and lets you set the CAT TCP port (default
 `1234`).
 
+While the portal is open the radio keeps trying the saved list in the background,
+one network per 30 s cycle. Two things follow from that, both measured on hardware:
+
+- **The setup AP moves to your router's channel.** An ESP32 in AP+STA mode cannot
+  hold two channels, so the moment the station associates the access point follows
+  it and every phone connected to the portal is briefly dropped. They reconnect on
+  their own; it looks like one stalled page load.
+- **The portal does not close just because the radio reconnected.** It closes when
+  you close it, when the 5-minute idle timeout fires, or 8 s after a network *you*
+  saved in the form comes up — not after an incidental background reconnect. That
+  distinction cost a fix: without it, opening the page on a radio whose network was
+  in range gave you eleven seconds before the AP vanished.
+
 Saved networks are tried in order, 10 s each; if the whole list fails the portal
 comes back. The portal shuts itself down after 5 minutes of nobody finishing
 setup, so an open AP is never left running unattended — if nothing was
@@ -442,6 +455,10 @@ Status icons are redrawn ~800 ms after a client connects rather than immediately
 sprite lives in PSRAM and pushing it stalls the other core's flash-cache fetches, and
 doing that on top of a client's opening handshake was enough to break it.
 
+Measured end to end over WiFi TCP, 100 round trips: **5.6 ms median, 42 ms at the 95th
+percentile, 82 ms worst**. Seventy queries written as a single burst came back as
+seventy well-formed frames with `IF;` at exactly 38 bytes.
+
 ### Concurrency: who owns what
 
 Two cores, and the split matters. The **main loop** (core 1) owns the SI4735, the
@@ -469,8 +486,8 @@ reboot minutes later with no obvious cause.
 
 ### Built-in diagnostics
 
-Four non-Kenwood commands, added because GPIO and socket faults are far easier to
-measure than to guess at:
+Five non-Kenwood commands, added because GPIO, socket and WiFi faults are far easier
+to measure than to guess at:
 
 | Command | Reports |
 |---|---|
@@ -478,6 +495,7 @@ measure than to guess at:
 | `ZZP;` | live level of every GPIO the board does not otherwise use |
 | `ZZN;` | TCP client slots: which are live, and how long since each was active |
 | `ZZE;` | the last set that was refused, and why — the answer a silent rejection cannot give |
+| `ZZW;` | WiFi state: enabled, suspended, radio powered, state machine, portal, IP, SSID, saved networks, CAT port |
 
 `ZZB` is what identified the button fault as an inert pull-up rather than a dead
 button, and `ZZN` made client-slot exhaustion visible.
@@ -546,9 +564,14 @@ Flrig. The radio now shows the percentage, which agrees with Flrig **exactly** a
   [Latency](#latency-what-actually-mattered)), so it runs at 17 dBm and the
   answer to noise is to switch the transport off. Tethered, that happens by
   itself.
-- **CAT USB silences the boot log.** They share one port, and interleaving them
-  would corrupt every reply. With `CAT USB` on, the `[BOOT]` lines are
-  suppressed; turn it off to get them back for debugging.
+- **CAT USB silences the boot log — and the libraries too.** They share one port,
+  and interleaving them corrupts every reply. Three separate sources had to be
+  gagged, which is more than it sounds: the sketch's own `[BOOT]` prints, FastLED's
+  runtime driver log (see `build_opt.h`), and the ESP-IDF's `esp_log`, which emits
+  things like `E (283531) wifi:sta is connecting, cannot set config` from inside the
+  WiFi driver. The last one was found on hardware, arriving glued to the end of a
+  CAT reply and splitting the frame. `esp_log_level_set` follows port ownership, so
+  all three come back when `CAT USB` is off.
 - **The CDC write timeout follows ownership.** A CDC write blocks for ~100 ms
   per call when no host is draining the buffer, which would stall the radio loop
   while CAT is running, so the timeout drops to **10 ms** while `CAT USB` is on.

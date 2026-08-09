@@ -39,6 +39,7 @@ static bool     portalSawRequest = false;  // did anyone actually open the page?
 static uint8_t  portalIdleCycles = 0;      // consecutive unattended portal windows
 static uint32_t portalRetryAt    = 0;      // next saved-network attempt while in portal
 static uint8_t  portalRetryIdx   = 0;      // which saved network that attempt uses
+static bool     portalSaveJoin   = false;  // the join in flight came from the portal form
 static bool     setupOnly        = false;  // portal opened purely to configure WiFi
 static bool     radioOn          = false;  // WiFi hardware powered
 static bool     suspended        = false;  // powered down while USB is the link
@@ -380,6 +381,7 @@ static void portalHandleSave()
   }
 
   int8_t slot = credUpsert(ssid.c_str(), pass.c_str());
+  portalSaveJoin = true;      // this join is the user's; onConnected() may close up
   portalSendPage("Saved \"" + ssid + "\" - connecting, watch the radio screen.");
 
   // Configuring a network means they want to use it, so promote a setup-only
@@ -485,6 +487,13 @@ void netStartPortal()
 
     portalOpen = true;
     portalSawRequest = false;
+    portalSaveJoin = false;
+
+    // Hold the background retry off briefly. Firing it immediately aborted the scan
+    // started just below -- a join and a scan cannot share the radio -- so the
+    // "Networks in range" list rendered empty on the very page the user opened to
+    // pick a network from. A scan takes two to four seconds; this gives it room.
+    portalRetryAt = millis() + 8000;
 
     // A scan takes the station off-channel for seconds, which drops a live CAT link
     // -- precisely what the comment below promises not to do -- and aborts an
@@ -563,6 +572,7 @@ static void portalShutdown()
   if (web) web->stop();
   if (dns) dns->stop();
   portalOpen = false;
+  portalSaveJoin = false;
 
   WiFi.softAPdisconnect(true);
   // Drop the AP interface entirely rather than idling in AP_STA.
@@ -666,9 +676,16 @@ static void onConnected()
     mdnsUp = true;
   }
 
-  // If the portal is up it was probably how we got here; leave it briefly so the
-  // browser can render the result page before the AP disappears.
-  if (portalOpen) portalGraceUntil = millis() + NET_PORTAL_GRACE;
+  // Leave the portal up briefly *only* when this join is what the user asked the
+  // portal for, so their browser can render the result before the AP disappears.
+  //
+  // Testing "portal is open" alone was true until NET_PORTAL gained a background
+  // retry: after that, opening WiFi Cfg on a radio whose saved network is in range
+  // reconnected within seconds and started this countdown on its own, so the setup
+  // page the user had just asked for vanished about eleven seconds later -- long
+  // before anyone could type an SSID into it. Measured on hardware.
+  if (portalOpen && portalSaveJoin) portalGraceUntil = millis() + NET_PORTAL_GRACE;
+  portalSaveJoin = false;
 }
 
 void netBegin()
@@ -736,6 +753,9 @@ void netPoll()
         catNetQuiesce(200);
         WiFi.disconnect();
         joinUntil = 0;
+        // That attempt is over. A background reconnect afterwards is not the join
+        // the user asked the portal for, so it must not close the portal on them.
+        portalSaveJoin = false;
         if (tryIdx + 1 < credCount) beginConnect(tryIdx + 1);
         else netStartPortal();          // whole list exhausted
       }
@@ -766,6 +786,15 @@ void netPoll()
         portalRetryAt = millis() + 30000;
         if (portalRetryIdx >= credCount) portalRetryIdx = 0;
         tryIdx = portalRetryIdx;
+
+        // Stop the driver's own attempt first. esp_wifi keeps auto-retrying a failed
+        // association in the background, which leaves the station in "connecting"
+        // and makes esp_wifi_set_config reject the next begin outright -- the IDF
+        // prints "sta is connecting, cannot set config" and the call does nothing.
+        // Measured on hardware: with one dead credential saved, this retry silently
+        // no-opped every 30 s and the radio never reached the good network again,
+        // which is the exact failure the walk exists to prevent.
+        WiFi.disconnect();
         WiFi.begin(credSsid[portalRetryIdx], credPass[portalRetryIdx]);
         // The state stays NET_PORTAL here, so joinInFlight() is what keeps a Rescan
         // from aborting this association.
