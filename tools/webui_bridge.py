@@ -27,7 +27,9 @@ Usage:
 """
 
 import argparse
+import ipaddress
 import json
+import socket
 import os
 import queue
 import threading
@@ -271,11 +273,42 @@ def validate(c, v):
         raise ValueError(f"{c} out of range")
 
 
+# Hostnames this server answers to. A page on some other site can still make the
+# browser send requests here, and with DNS rebinding its own domain can resolve to
+# this machine. Accepting only IP literals and this machine's own names rejects
+# both, because the attacker's domain name arrives in the Host header.
+_HOSTNAME = socket.gethostname().lower()
+LOCAL_NAMES = {"localhost", _HOSTNAME, _HOSTNAME + ".local"}
+
+
+def host_ok(host_header):
+    if not host_header:
+        return False
+    h = host_header.strip().lower()
+    if h.startswith("["):                      # [::1]:8073
+        h = h[1:h.find("]")]
+    elif h.count(":") == 1:
+        h = h.rsplit(":", 1)[0]
+    if h in LOCAL_NAMES:
+        return True
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        return False
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *a):
         pass
+
+    def _reject_foreign(self):
+        if not host_ok(self.headers.get("Host")):
+            self._json({"error": "unexpected Host header"}, 403)
+            return True
+        return False
 
     def _json(self, obj, code=200):
         body = json.dumps(obj).encode()
@@ -287,6 +320,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self._reject_foreign():
+            return
         path = self.path.split("?", 1)[0]
         if path == "/api/bands":
             # Re-read per request, so editing bands.json needs no bridge restart.
@@ -350,8 +385,18 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_POST(self):
+        if self._reject_foreign():
+            return
         if self.path != "/api/cmd":
             return self._json({"error": "not found"}, 404)
+        # Commands change the radio, so they must come from this page. A cross-site
+        # page cannot send application/json without a CORS preflight, which this
+        # server never answers; a browser also names the sending page in Origin.
+        if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
+            return self._json({"ok": False, "error": "Content-Type must be application/json"}, 415)
+        origin = self.headers.get("Origin")
+        if origin and origin.split("://", 1)[-1].rstrip("/").lower() != self.headers.get("Host", "").lower():
+            return self._json({"ok": False, "error": "cross-origin request refused"}, 403)
         try:
             n = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(n) or b"{}")
