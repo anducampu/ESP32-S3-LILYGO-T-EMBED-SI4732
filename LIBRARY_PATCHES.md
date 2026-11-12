@@ -92,10 +92,10 @@ Nothing else in Setup210 needs to change.
   transports and the WiFi credential store / captive portal. No library patches
   needed — they use `WiFi`, `WebServer`, `DNSServer`, `ESPmDNS` and
   `Preferences` from the core as shipped.
-- `ESP32_S3_LILYGO_T_EMBED_SI4732.ino`: migrated LEDC API from core 2.x
+- `ESP32_S3_LILYGO_T_EMBED_SI4732_WEBUI.ino`: migrated LEDC API from core 2.x
   (`ledcSetup`/`ledcAttachPin`/`ledcWrite(channel,...)`) to core 3.x
   (`ledcAttach(pin,freq,res)`/`ledcWrite(pin,...)`).
-- `ESP32_S3_LILYGO_T_EMBED_SI4732.ino`: added `Serial.begin(115200)` + boot
+- `ESP32_S3_LILYGO_T_EMBED_SI4732_WEBUI.ino`: added `Serial.begin(115200)` + boot
   diagnostic prints in `setup()`. Harmless; useful when debugging.
 - UX: double-press of the encoder now enters the menu with selection defaulting
   to **Volume** (was Band) — easier volume access. See the

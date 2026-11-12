@@ -98,6 +98,46 @@ bool     catRadioGetMute();
 void     catRadioSetMute(bool m);
 void     catRadioTouched();                // a CAT set landed: refresh the UI
 
+// ------------------------------------- web UI extensions (ZZ + two letters)
+// Everything the Kenwood set cannot carry, for the web UI and its PC bridge
+// (tools/webui_bridge.py). Two-letter subcommands so they never collide with the
+// one-letter diagnostics (ZZB ZZP ZZN ZZE ZZW).
+//
+//   ZZRS;          receiver status, key=value (see buildRS in the .cpp)
+//   ZZRG;          raw RDS groups this connection has not seen yet
+//   ZZBD; ZZBDnn;  band index        ZZST; ZZSTn;   step index (FM / AM table)
+//   ZZBW; ZZBWn;   bandwidth index   ZZAG; ZZAGnn;  0 = AGC, 1 = off, 2..35 = att
+//   ZZSM; ZZSMnn;  soft mute 0..32   ZZSK; ZZSKU; ZZSKD; ZZSK0;  seek up/down/stop
+//
+// Sets follow the Kenwood rule: silent on success and on refusal (see ZZE;).
+struct CatRadioExt
+{
+  int8_t   band;
+  uint8_t  stepIdx, bwIdx, agcIdx, softMute;
+  int16_t  bfo;
+  uint8_t  rssi, snr;          // dBuV, dB
+  bool     pilot;              // FM stereo pilot
+  uint8_t  blend, multipath;   // FM: stereo blend %, multipath 0..100
+  int8_t   freqOff;            // FM: signed frequency offset, kHz
+  bool     seeking, ssbLoaded;
+};
+void     catRadioGetExt(CatRadioExt &e);
+bool     catRadioSetBand(uint8_t idx);
+bool     catRadioSetStep(uint8_t idx);
+bool     catRadioSetBandwidth(uint8_t idx);
+bool     catRadioSetAgc(uint8_t idx);
+bool     catRadioSetSoftMute(uint8_t v);
+bool     catRadioStartSeek(bool up);   // queues it; the loop runs it after the reply
+void     catRadioStopSeek();           // any core: only raises a flag
+
+// The loop feeds every RDS group it drains from the tuner through here, and calls
+// catRdsNewStation() whenever the tuned frequency changes, so a client never mixes
+// two stations' groups. catPublishSnapshot() refreshes what queries answer from
+// without servicing a set -- for progress inside a blocking seek.
+void     catRdsPush(uint16_t a, uint16_t b, uint16_t c, uint16_t d, uint8_t ble);
+void     catRdsNewStation();
+void     catPublishSnapshot();
+
 // Local diagnostics, reachable as "ZZB;" / "ZZP;". Not part of the Kenwood set;
 // they exist so GPIO trouble can be measured over CAT instead of guessed at.
 void     catRadioDiag(char kind, char *out, size_t n);

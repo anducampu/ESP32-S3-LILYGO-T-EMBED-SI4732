@@ -44,9 +44,10 @@ struct CatSnapshot
   uint8_t  volume;
   int16_t  rssi;
   bool     muted;
+  CatRadioExt ext;           // web UI extensions, answered by ZZRS / ZZBD / ...
 };
 
-static CatSnapshot     snap = {0, 0, 0, 0, false};
+static CatSnapshot     snap = {};
 static portMUX_TYPE    snapMux = portMUX_INITIALIZER_UNLOCKED;
 
 static CatSnapshot catSnapGet()
@@ -87,7 +88,8 @@ static void catSanitise(char *p)
 // hands one over and waits for it, so a client that writes then immediately reads
 // back -- which is exactly what Hamlib and Flrig do to verify -- sees the new
 // value rather than a stale snapshot.
-enum { REQ_NONE = 0, REQ_FREQ, REQ_MODE, REQ_VOLUME, REQ_MUTE };
+enum { REQ_NONE = 0, REQ_FREQ, REQ_MODE, REQ_VOLUME, REQ_MUTE,
+       REQ_BAND, REQ_STEP, REQ_BW, REQ_AGC, REQ_SMUTE, REQ_SEEK };
 
 static volatile uint8_t  reqKind = REQ_NONE;
 static volatile uint32_t reqVal  = 0;
@@ -154,6 +156,8 @@ struct CatChannel
   uint8_t  aiMode;       // 0 = no unsolicited output on this connection
   bool     reportCw;     // this client asked for CW, which we demodulate as USB
   uint32_t vfoBHz;       // shadow VFO B, per client
+  uint32_t rdsNext;      // next RDS group sequence this client has not been sent
+  uint16_t rdsEpoch;     // station epoch that cursor belongs to
 };
 
 static void catChannelReset(CatChannel &c)
@@ -163,6 +167,8 @@ static void catChannelReset(CatChannel &c)
   c.aiMode = 0;
   c.reportCw = false;
   c.vfoBHz = 0;
+  c.rdsNext = 0;
+  c.rdsEpoch = 0xFFFF;   // never a live epoch: the first ZZRG; resyncs
 }
 
 static WiFiServer *netServer = nullptr;
@@ -245,6 +251,64 @@ static void saveUsbEnabled()
   prefs.begin(CAT_NS, false);
   prefs.putBool("usb", usbEnabled);
   prefs.end();
+}
+
+// ------------------------------------------------------------- RDS group ring
+// The loop drains the tuner's RDS FIFO and pushes every group here; ZZRG; hands each
+// connection the ones it has not seen. Decoding happens in the web UI, so the
+// firmware stays small and the decoder is the same code wherever the page runs.
+// 64 groups is ~5.6 s at the standard 11.4 groups/s, far more than a poll interval.
+#define RDS_RING      64
+#define RDS_PER_REPLY 24     // 19 bytes each: keeps one reply under ~480 bytes
+
+struct RdsGrp { uint16_t a, b, c, d; uint8_t ble; };
+
+static RdsGrp       rdsRing[RDS_RING];
+static uint32_t     rdsHead       = 0;   // groups pushed since boot
+static uint32_t     rdsEpochStart = 0;   // rdsHead when the current station began
+static uint16_t     rdsEpoch      = 0;
+static portMUX_TYPE rdsMux = portMUX_INITIALIZER_UNLOCKED;
+
+void catRdsPush(uint16_t a, uint16_t b, uint16_t c, uint16_t d, uint8_t ble)
+{
+  portENTER_CRITICAL(&rdsMux);
+  rdsRing[rdsHead % RDS_RING] = {a, b, c, d, ble};
+  rdsHead++;
+  portEXIT_CRITICAL(&rdsMux);
+}
+
+void catRdsNewStation()
+{
+  portENTER_CRITICAL(&rdsMux);
+  rdsEpoch++;
+  rdsEpochStart = rdsHead;
+  portEXIT_CRITICAL(&rdsMux);
+}
+
+// "ZZRG e=<epoch> l=<lost> n=<count> AAAABBBBCCCCDDDDEE ...;"
+// EE packs the four 2-bit block error levels, A in the top bits (as the chip does).
+// l counts groups this client missed because the ring wrapped past its cursor.
+static void buildRG(char *out, size_t n, CatChannel &ch)
+{
+  RdsGrp g[RDS_PER_REPLY];
+  uint32_t lost = 0, cnt = 0;
+  uint16_t ep;
+
+  portENTER_CRITICAL(&rdsMux);
+  ep = rdsEpoch;
+  if (ch.rdsEpoch != ep) { ch.rdsEpoch = ep; ch.rdsNext = rdsEpochStart; }
+  uint32_t oldest = (rdsHead > RDS_RING) ? rdsHead - RDS_RING : 0;
+  if (ch.rdsNext < oldest) { lost = oldest - ch.rdsNext; ch.rdsNext = oldest; }
+  while (ch.rdsNext < rdsHead && cnt < RDS_PER_REPLY)
+    g[cnt++] = rdsRing[ch.rdsNext++ % RDS_RING];
+  portEXIT_CRITICAL(&rdsMux);
+
+  int u = snprintf(out, n, "ZZRG e=%u l=%lu n=%lu", (unsigned)ep,
+                   (unsigned long)lost, (unsigned long)cnt);
+  for (uint32_t i = 0; i < cnt && u > 0 && (size_t)u < n; i++)
+    u += snprintf(out + u, n - u, " %04X%04X%04X%04X%02X",
+                  g[i].a, g[i].b, g[i].c, g[i].d, g[i].ble);
+  if (u > 0 && (size_t)u < n - 1) { out[u] = ';'; out[u + 1] = 0; }
 }
 
 // --------------------------------------------------------------- output path
@@ -496,6 +560,78 @@ static void catExecute(const char *cmd, CatChannel &ch, Stream &out)
   // ---- ZZ: local diagnostics (not Kenwood) -----------------------------
   if (!strncmp(cmd, "ZZ", 2))
   {
+    // ---- web UI extensions: two-letter subcommands -----------------------
+    if (alen == 2 && !strncmp(arg, "RS", 2))
+    {
+      CatRadioExt e = catSnapGet().ext;
+      char z[200];
+      snprintf(z, sizeof(z),
+               "ZZRS b=%d st=%u bw=%u agc=%u sm=%u bfo=%d rssi=%u snr=%u pil=%d bl=%u mp=%u off=%d sk=%d ssb=%d;",
+               e.band, e.stepIdx, e.bwIdx, e.agcIdx, e.softMute, e.bfo, e.rssi, e.snr,
+               e.pilot ? 1 : 0, e.blend, e.multipath, e.freqOff,
+               e.seeking ? 1 : 0, e.ssbLoaded ? 1 : 0);
+      catEmit(out, z);
+      return;
+    }
+    if (alen == 2 && !strncmp(arg, "RG", 2))
+    {
+      char z[RDS_PER_REPLY * 19 + 48];
+      buildRG(z, sizeof(z), ch);
+      catEmit(out, z);
+      return;
+    }
+    if (alen >= 2 && !strncmp(arg, "SK", 2))
+    {
+      if (alen == 2)
+      {
+        catEmit(out, catSnapGet().ext.seeking ? "ZZSK1;" : "ZZSK0;");
+        return;
+      }
+      // Stop is a flag the seek loop polls, not a marshalled request: the loop is
+      // the thing that is busy, so a request would wait behind the seek it stops.
+      if (arg[2] == '0') { catRadioStopSeek(); return; }
+      if (arg[2] == 'U' || arg[2] == 'D')
+      {
+        if (!catRequest(REQ_SEEK, arg[2] == 'U')) noteReject("ZZSK not now (SSB?)");
+        return;
+      }
+      noteReject("ZZSK malformed");
+      return;
+    }
+    {
+      // Numeric get/set pairs: ZZBD ZZST ZZBW ZZAG ZZSM
+      static const struct { const char *k; uint8_t req; uint8_t max; } nums[] = {
+        {"BD", REQ_BAND, 99}, {"ST", REQ_STEP, 9}, {"BW", REQ_BW, 9},
+        {"AG", REQ_AGC, 35}, {"SM", REQ_SMUTE, 32},
+      };
+      for (auto &nm : nums)
+      {
+        if (alen < 2 || strncmp(arg, nm.k, 2)) continue;
+        if (alen == 2)
+        {
+          CatRadioExt e = catSnapGet().ext;
+          int v = 0;
+          switch (nm.req)
+          {
+            case REQ_BAND:  v = e.band; break;
+            case REQ_STEP:  v = e.stepIdx; break;
+            case REQ_BW:    v = e.bwIdx; break;
+            case REQ_AGC:   v = e.agcIdx; break;
+            case REQ_SMUTE: v = e.softMute; break;
+          }
+          char z[16];
+          snprintf(z, sizeof(z), "ZZ%s%02d;", nm.k, v);
+          catEmit(out, z);
+          return;
+        }
+        char *endp = nullptr;
+        long v = strtol(arg + 2, &endp, 10);
+        if (!endp || *endp || v < 0 || v > nm.max) { noteReject("ZZ value out of range"); return; }
+        if (!catRequest(nm.req, (uint32_t)v)) noteReject("ZZ set refused");
+        return;
+      }
+    }
+
     if (alen == 1 && arg[0] == 'W')
     {
       CatNetSnap n;
@@ -964,10 +1100,16 @@ static void catRefreshSnapshot()
   c.volume = catRadioGetVolume();
   c.rssi   = (int16_t)catRadioGetRssiDbuv();
   c.muted  = catRadioGetMute();
+  catRadioGetExt(c.ext);
 
   portENTER_CRITICAL(&snapMux);
   snap = c;
   portEXIT_CRITICAL(&snapMux);
+}
+
+void catPublishSnapshot()
+{
+  catRefreshSnapshot();
 }
 
 // Called from loop(): apply a queued set, then refresh the snapshot.
@@ -985,6 +1127,12 @@ void catServiceFromLoop()
       case REQ_MODE:   ok = catRadioSetMode((uint8_t)v); break;
       case REQ_VOLUME: catRadioSetVolume((uint8_t)v); ok = true; break;
       case REQ_MUTE:   catRadioSetMute(v != 0); ok = true; break;
+      case REQ_BAND:   ok = catRadioSetBand((uint8_t)v); break;
+      case REQ_STEP:   ok = catRadioSetStep((uint8_t)v); break;
+      case REQ_BW:     ok = catRadioSetBandwidth((uint8_t)v); break;
+      case REQ_AGC:    ok = catRadioSetAgc((uint8_t)v); break;
+      case REQ_SMUTE:  ok = catRadioSetSoftMute((uint8_t)v); break;
+      case REQ_SEEK:   ok = catRadioStartSeek(v != 0); break;
     }
     if (ok) catRadioTouched();
     reqOk     = ok;

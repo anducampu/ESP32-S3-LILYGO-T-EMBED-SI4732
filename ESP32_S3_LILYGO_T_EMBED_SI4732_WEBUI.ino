@@ -360,7 +360,13 @@ Battery18650Stats battery(VBAT_MON);
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite spr = TFT_eSprite(&tft);
 
-SI4735 rx;
+// currentRdsStatus is protected in the library; the web UI needs the raw blocks.
+class RadioRx : public SI4735
+{
+public:
+  const si47x_rds_status &rdsRaw() const { return currentRdsStatus; }
+};
+RadioRx rx;
 
 // --- Screen timeout + APA102 LED ring state ---------------------------------
 // Physical-to-logical sort order for the 7-LED ring around the encoder, taken
@@ -1932,20 +1938,38 @@ void showRDSTime()
 
 void checkRDS()
 {
-  rx.getRdsStatus();
-  if (rx.getRdsReceived())
+  // A new frequency is a new station: tell CAT so no client mixes two stations'
+  // groups. Covers every retune path (encoder, CAT, band change, seek) in one place.
+  static uint16_t rdsFreq = 0;
+  if (currentFrequency != rdsFreq) { rdsFreq = currentFrequency; catRdsNewStation(); }
+
+  // Drain the whole FIFO. This used to pop one group per 90 ms call, which is the
+  // rate groups arrive (11.4/s), so the FIFO crept towards overflow and dropped
+  // groups. Ask for the count without consuming (STATUSONLY), then pop that many --
+  // RDSFIFOUSED is ambiguous about whether it counts the group just popped.
+  rx.getRdsStatus(0, 0, 1);
+  uint8_t pending = rx.getNumRdsFifoUsed();
+  if (pending > 25) pending = 25;           // the FIFO is 25 groups deep
+  bool namePending = false;
+  for (uint8_t i = 0; i < pending; i++)
   {
-    if (rx.getRdsSync() && rx.getRdsSyncFound())
+    rx.getRdsStatus(0, 0, 0);
+    const si47x_rds_status &st = rx.rdsRaw();
+    catRdsPush(((uint16_t)st.resp.BLOCKAH << 8) | st.resp.BLOCKAL,
+               ((uint16_t)st.resp.BLOCKBH << 8) | st.resp.BLOCKBL,
+               ((uint16_t)st.resp.BLOCKCH << 8) | st.resp.BLOCKCL,
+               ((uint16_t)st.resp.BLOCKDH << 8) | st.resp.BLOCKDL,
+               st.raw[12]);
+    // The screen's PS still comes from the library's own parser, group by group.
+    if (rx.getRdsReceived() && rx.getRdsSync() && rx.getRdsSyncFound())
     {
       rdsMsg = rx.getRdsText2A();
-      stationName = rx.getRdsText0A();
+      char *ps = rx.getRdsText0A();
       rdsTime = rx.getRdsTime();
-      // if ( rdsMsg != NULL )   showRDSMsg();
-      if (stationName != NULL)         
-          showRDSStation();
-      // if ( rdsTime != NULL ) showRDSTime();
+      if (ps != NULL) { stationName = ps; namePending = true; }
     }
   }
+  if (namePending) showRDSStation();
 }
 
 /***************************************************************************************
@@ -2215,6 +2239,13 @@ void catRadioSetVolume(uint8_t v)
   catMarkDirty();
 }
 
+// Signal quality as last read for CAT, private so the on-screen meter's own
+// change detection is not disturbed (see below).
+static struct { uint8_t rssi, snr, blend, multipath; bool pilot; int8_t freqOff; } catQ = {};
+static volatile bool   remoteSeeking = false;
+static volatile bool   remoteSeekStop = false;
+static volatile int8_t remoteSeekReq = 0;     // +1 up, -1 down, 0 none
+
 int catRadioGetRssiDbuv()
 {
   // Keep a private cache. Writing the shared `rssi` global meant loop()'s
@@ -2222,15 +2253,27 @@ int catRadioGetRssiDbuv()
   // CAT, so the on-screen S-meter froze for as long as a client kept polling.
   // Clients poll several times a second, so throttle the I2C read to 250 ms.
   static uint32_t lastRead = 0;
-  static uint8_t  catRssi = 0;
   if (!radioPresent) return 0;      // no chip to read: do not stall on a dead bus
-  if (millis() - lastRead > 250)
+  // Not while seeking: the seek loop owns the tuner's status until STC.
+  if (!remoteSeeking && millis() - lastRead > 250)
   {
     lastRead = millis();
     rx.getCurrentReceivedSignalQuality();
-    catRssi = rx.getCurrentRSSI();
+    catQ.rssi = rx.getCurrentRSSI();
+    catQ.snr  = rx.getCurrentSNR();
+    if (currentMode == FM)
+    {
+      catQ.pilot     = rx.getCurrentPilot();
+      catQ.blend     = rx.getCurrentStereoBlend();
+      catQ.multipath = rx.getCurrentMultipath();
+      catQ.freqOff   = (int8_t)rx.getCurrentSignedFrequencyOffset();
+    }
+    else
+    {
+      catQ.pilot = false; catQ.blend = catQ.multipath = 0; catQ.freqOff = 0;
+    }
   }
-  return (int)catRssi;
+  return (int)catQ.rssi;
 }
 
 bool catRadioGetMute()
@@ -2280,6 +2323,172 @@ void catRadioDiag(char kind, char *out, size_t n)
   }
 
   snprintf(out, n, " ?");
+}
+
+// ---------------------------------------------------- web UI extensions (ZZ)
+// Absolute setters for what the encoder menu changes by +-1. They mirror doBand(),
+// doStep(), doBandwidth(), doAgc() and doSoftMute() but skip the drawing and the
+// button-release delays: catRadioTouched() redraws once afterwards.
+
+void catRadioGetExt(CatRadioExt &e)
+{
+  e.band     = (int8_t)bandIdx;
+  e.stepIdx  = (uint8_t)currentStepIdx;
+  e.bwIdx    = (uint8_t)((currentMode == FM) ? bwIdxFM
+                       : (currentMode == AM) ? bwIdxAM : bwIdxSSB);
+  e.agcIdx   = (uint8_t)agcIdx;
+  e.softMute = (uint8_t)softMuteMaxAttIdx;
+  e.bfo      = currentBFO;
+  e.rssi     = catQ.rssi;
+  e.snr      = catQ.snr;
+  e.pilot    = catQ.pilot;
+  e.blend    = catQ.blend;
+  e.multipath = catQ.multipath;
+  e.freqOff  = catQ.freqOff;
+  e.seeking  = remoteSeeking;
+  e.ssbLoaded = ssbLoaded;
+}
+
+bool catRadioSetBand(uint8_t idx)
+{
+  if (!radioPresent || idx > lastBand) return false;
+  if (idx == bandIdx) return true;
+  band[bandIdx].currentFreq = currentFrequency;
+  band[bandIdx].currentStepIdx = currentStepIdx;
+  bandIdx = idx;
+  useBand();
+  // setSSB() inside useBand() clears the chip's BFO; see catRadioSetMode().
+  if (currentMode == LSB || currentMode == USB) rx.setSSBBfo(currentBFO);
+  catMarkDirty();
+  return true;
+}
+
+bool catRadioSetStep(uint8_t idx)
+{
+  if (!radioPresent) return false;
+  if (currentMode == FM)
+  {
+    if (idx > lastFmStep) return false;
+    idxFmStep = currentStepIdx = idx;
+    rx.setFrequencyStep(tabFmStep[idx]);
+  }
+  else
+  {
+    if (idx > lastAmStep) return false;
+    idxAmStep = currentStepIdx = idx;
+    rx.setFrequencyStep(tabAmStep[idx]);
+    rx.setSeekAmSpacing(5);
+  }
+  band[bandIdx].currentStepIdx = currentStepIdx;
+  catMarkDirty();
+  return true;
+}
+
+bool catRadioSetBandwidth(uint8_t idx)
+{
+  if (!radioPresent) return false;
+  if (currentMode == LSB || currentMode == USB)
+  {
+    if (idx > maxSsbBw) return false;
+    bwIdxSSB = idx;
+    rx.setSSBAudioBandwidth(bandwidthSSB[bwIdxSSB].idx);
+    // About 2 kHz or narrower wants the sideband cutoff filter off (as doBandwidth).
+    uint8_t d = bandwidthSSB[bwIdxSSB].idx;
+    rx.setSSBSidebandCutoffFilter((d == 0 || d == 4 || d == 5) ? 0 : 1);
+    band[bandIdx].bandwidthIdx = bwIdxSSB;
+  }
+  else if (currentMode == AM)
+  {
+    if (idx > maxAmBw) return false;
+    bwIdxAM = idx;
+    rx.setBandwidth(bandwidthAM[bwIdxAM].idx, 1);
+    band[bandIdx].bandwidthIdx = bwIdxAM;
+  }
+  else
+  {
+    if (idx > maxFmBw) return false;
+    bwIdxFM = idx;
+    rx.setFmBandwidth(bandwidthFM[bwIdxFM].idx);
+    band[bandIdx].bandwidthIdx = bwIdxFM;
+  }
+  catMarkDirty();
+  return true;
+}
+
+bool catRadioSetAgc(uint8_t idx)
+{
+  if (!radioPresent || idx > 35) return false;
+  agcIdx = idx;
+  disableAgc = (agcIdx > 0);
+  agcNdx = (agcIdx > 1) ? agcIdx - 1 : 0;
+  rx.setAutomaticGainControl(disableAgc, agcNdx);
+  return true;
+}
+
+bool catRadioSetSoftMute(uint8_t v)
+{
+  if (!radioPresent || v > 32 || currentMode == FM) return false;
+  softMuteMaxAttIdx = v;
+  if (currentMode == LSB || currentMode == USB) rx.setSsbSoftMuteMaxAttenuation(v);
+  else rx.setAmSoftMuteMaxAttenuation(v);
+  return true;
+}
+
+// Seek blocks the loop for up to the library's maxSeekTime, far past the 3 s a CAT
+// set waits for its answer. So the set only queues it, and serviceRemoteSeek()
+// runs it from loop() once the reply has gone. Queries keep being answered from
+// the snapshot, which the progress callback refreshes on every step.
+bool catRadioStartSeek(bool up)
+{
+  if (!radioPresent || currentMode == LSB || currentMode == USB) return false;
+  remoteSeekReq = up ? 1 : -1;
+  // Report it as seeking from now: the snapshot taken before this set is acked would
+  // otherwise say "not seeking", and a client polling ZZSK; would think it finished.
+  remoteSeeking = true;
+  return true;
+}
+
+void catRadioStopSeek()
+{
+  remoteSeekStop = true;
+  remoteSeekReq = 0;
+}
+
+static void remoteSeekShow(uint16_t f)
+{
+  currentFrequency = f;
+  showFrequency();
+  catPublishSnapshot();
+}
+
+static bool remoteSeekShouldStop()
+{
+  return remoteSeekStop;
+}
+
+void serviceRemoteSeek()
+{
+  int8_t d = remoteSeekReq;
+  if (!d)
+  {
+    // Stopped before it started (ZZSK0; clears the request): drop the flag too.
+    if (remoteSeeking && remoteSeekStop) { remoteSeeking = false; catPublishSnapshot(); }
+    return;
+  }
+  remoteSeekReq = 0;
+  if (currentMode == LSB || currentMode == USB) { remoteSeeking = false; return; }
+
+  remoteSeekStop = false;
+  remoteSeeking = true;
+  catPublishSnapshot();
+  rx.seekStationProgress(remoteSeekShow, remoteSeekShouldStop, d > 0 ? 1 : 0);
+  currentFrequency = rx.getFrequency();
+  band[bandIdx].currentFreq = currentFrequency;
+  remoteSeeking = false;
+  cleanBfoRdsInfo();
+  catMarkDirty();
+  catRadioTouched();
+  catPublishSnapshot();
 }
 
 void catRadioTouched()
@@ -2488,9 +2697,13 @@ void loop()
   }
 
   if ((millis() - lastRDSCheck) > RDS_CHECK_TIME) {
-    if ((currentMode == FM) and (snr >= 12)) checkRDS();
+    // No SNR gate any more: with no RDS the FIFO is empty and this costs one status
+    // read, while the gate threw away groups from weak-but-decodable stations.
+    if (currentMode == FM) checkRDS();
     lastRDSCheck = millis();
-  }  
+  }
+
+  serviceRemoteSeek();
 
   // Show the current frequency only if it has changed
   if (itIsTimeToSave)

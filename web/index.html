@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>T-Embed Radio</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h16v11H4z M7 9l9-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="15" cy="14.5" r="2.6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7 13h3M7 16h3" stroke="currentColor" stroke-width="1.8"/></svg>
+    <span>T-Embed SI4732</span>
+  </div>
+  <div class="conn">
+    <span id="utc" class="utc" title="UTC"></span>
+    <span id="connPill" class="pill off" role="status">Not connected</span>
+  </div>
+</header>
+
+<main class="grid">
+  <!-- Columns: A = tune, B = listen, C = station data. On a phone the columns
+       dissolve (display: contents) and the cards stack in reading order. -->
+  <div class="col col-a">
+    <section class="card tuner" aria-label="Tuner">
+      <div class="card-head">
+        <h2><span id="bandName">—</span> <span id="bandDesc" class="muted"></span></h2>
+        <span id="modeBadge" class="badge">—</span>
+      </div>
+
+      <div class="freq-line">
+        <button id="freqDisplay" class="freq" title="Click to type a frequency. Scroll or use ←/→ to tune.">
+          <span id="freqVal">———</span><span id="freqUnit" class="unit"></span>
+        </button>
+        <form id="freqForm" class="freq-form" hidden>
+          <input id="freqInput" inputmode="decimal" autocomplete="off" spellcheck="false"
+                 aria-label="Frequency" placeholder="7074 · 104.8 · 7.0743m">
+          <button class="btn">Tune</button>
+        </form>
+        <div class="freq-sub">
+          <span id="psInline" class="ps-inline"></span>
+          <span id="seekNote" class="seek-note" hidden>Seeking…</span>
+          <span id="bfoNote" class="muted" hidden></span>
+        </div>
+      </div>
+
+      <div class="tune-row">
+        <button id="btnSeekDown" class="btn seek" aria-label="Seek down" title="Seek down">◀◀</button>
+        <button id="btnDown" class="btn" aria-label="Step down">◀</button>
+        <div class="range-box">
+          <input id="tuneRange" type="range" aria-label="Tune within band">
+          <div class="range-ends"><span id="rangeLo"></span><span id="rangeHi"></span></div>
+        </div>
+        <button id="btnUp" class="btn" aria-label="Step up">▶</button>
+        <button id="btnSeekUp" class="btn seek" aria-label="Seek up" title="Seek up">▶▶</button>
+      </div>
+
+      <div class="rows">
+        <div class="r"><span class="rl">Step</span><div id="steps" class="chips" role="radiogroup" aria-label="Tuning step"></div></div>
+        <div class="r" id="modeRow"><span class="rl">Mode</span><div id="modes" class="seg" role="radiogroup" aria-label="Mode"></div></div>
+        <div class="r" id="fmModeNote" hidden><span class="rl">Mode</span><span class="muted">FM on VHF. Pick an AM band for AM / SSB.</span></div>
+        <div class="r"><span class="rl">Here</span><div id="plan" class="plan"></div></div>
+      </div>
+    </section>
+
+    <section class="card bands" aria-label="Bands">
+      <div class="card-head"><h2>Bands</h2></div>
+      <div id="bandGroups" class="rows"></div>
+    </section>
+  </div>
+
+  <div class="col col-b">
+    <section class="card signal" aria-label="Signal">
+      <div class="card-head">
+        <h2>Signal</h2>
+        <span class="sig-read"><span id="sUnits" class="big-num">—</span> <span id="dbuv" class="muted"></span></span>
+      </div>
+      <div class="meter" aria-hidden="true"><div id="meterFill" class="meter-fill"></div></div>
+      <div class="meter-ticks" aria-hidden="true"></div>
+      <dl id="sigStats" class="stats"></dl>
+      <canvas id="spark" height="40" aria-label="Signal history, last 60 seconds" title="Signal strength, last 60 s"></canvas>
+    </section>
+
+    <section class="card controls" aria-label="Controls">
+      <div class="card-head"><h2>Controls</h2><span id="bwHint" class="muted small"></span></div>
+      <div class="rows">
+        <div class="r">
+          <span class="rl">Volume</span>
+          <div class="slide">
+            <button id="btnMute" class="btn small" aria-pressed="false">Mute</button>
+            <input id="vol" type="range" min="0" max="63" step="1" aria-label="Volume">
+            <span id="volPct" class="val">—</span>
+          </div>
+        </div>
+        <div class="r">
+          <span class="rl" title="IF filter width. Narrower rejects neighbouring stations, wider sounds better.">Bandwidth</span>
+          <div id="bws" class="chips" role="radiogroup" aria-label="Bandwidth"></div>
+        </div>
+        <div class="r">
+          <label class="rl" for="agc" title="Far left: automatic gain. One step right: AGC off at full gain. Further right: attenuation for a strong local signal.">AGC / Att</label>
+          <div class="slide"><input id="agc" type="range" min="0" max="35" step="1"><span id="agcVal" class="val wide"></span></div>
+        </div>
+        <div class="r" id="smCtl">
+          <label class="rl" for="sm" title="Quietens the hiss as a signal fades into the noise. AM and SSB only.">Soft mute</label>
+          <div class="slide"><input id="sm" type="range" min="0" max="32" step="1"><span id="smVal" class="val wide"></span></div>
+        </div>
+      </div>
+      <p class="foot muted">Audio plays from the radio's headphone jack. This page is a remote control.</p>
+    </section>
+  </div>
+
+  <div class="col col-c">
+    <section class="card rds" id="rdsCard" aria-label="RDS" hidden>
+      <div class="card-head">
+        <h2>RDS</h2>
+        <div class="seg small" role="radiogroup" aria-label="RDS standard">
+          <button class="chip" data-region="EU" role="radio" title="European RDS: PTY names and PI country">RDS</button>
+          <button class="chip" data-region="NA" role="radio" title="North American RBDS: PTY names and call letters">RBDS</button>
+        </div>
+      </div>
+      <p id="rdsEmpty" class="muted">Waiting for RDS data…</p>
+      <div id="rdsBody" hidden>
+        <div class="rds-top">
+          <div id="rdsPs" class="rds-ps">—</div>
+          <div id="rdsLps" class="muted"></div>
+          <div id="rdsFlags" class="flags"></div>
+        </div>
+
+        <div class="rds-grid">
+          <div class="blk">
+            <h3>Station</h3>
+            <dl id="rdsIdent" class="kv"></dl>
+          </div>
+          <div class="blk">
+            <h3>RadioText</h3>
+            <p id="rdsRt" class="rt">—</p>
+            <p id="rdsRtDone" class="muted small"></p>
+            <div id="rdsRtPlusWrap" hidden>
+              <h3>Now playing (RT+)</h3>
+              <dl id="rdsRtPlus" class="kv"></dl>
+            </div>
+            <div id="rdsClockWrap" hidden>
+              <h3>Clock time</h3>
+              <p id="rdsClock" class="mono"></p>
+            </div>
+          </div>
+          <div class="blk" id="rdsAfWrap" hidden>
+            <h3>Alternative frequencies <span id="rdsAfMeta" class="muted"></span></h3>
+            <div id="rdsAf" class="chips"></div>
+          </div>
+          <div class="blk" id="rdsOdaWrap" hidden>
+            <h3>Open data applications</h3>
+            <dl id="rdsOda" class="kv"></dl>
+          </div>
+          <div class="blk span" id="rdsEonWrap" hidden>
+            <h3>Other networks (EON)</h3>
+            <div class="table-wrap"><table id="rdsEon"><thead><tr><th>PI</th><th>Name</th><th>PTY</th><th>TP / TA</th><th>Frequencies</th></tr></thead><tbody></tbody></table></div>
+          </div>
+          <div class="blk span">
+            <h3>Groups <span id="rdsRate" class="muted"></span></h3>
+            <div id="rdsHist" class="hist" aria-label="Groups received by type"></div>
+            <details id="rdsRawWrap">
+              <summary>Raw groups</summary>
+              <pre id="rdsRaw" class="raw"></pre>
+            </details>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<div id="toast" class="toast" role="alert" hidden></div>
+
+<script src="rds.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

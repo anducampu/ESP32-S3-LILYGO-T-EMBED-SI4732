@@ -506,6 +506,60 @@ to measure than to guess at:
 `ZZB` is what identified the button fault as an inert pull-up rather than a dead
 button, and `ZZN` made client-slot exhaustion visible.
 
+### Web UI extensions
+
+Two-letter `ZZ` subcommands carry what the Kenwood set cannot, for the web UI
+below. They follow the same reply discipline: a query is answered, a set is silent,
+and a refused set is readable with `ZZE;`.
+
+| Send | Kind | Answer / effect |
+|---|---|---|
+| `ZZRS;` | query | Receiver status as `key=value`: band `b`, step `st`, bandwidth `bw`, `agc`, soft mute `sm`, `bfo` (Hz), `rssi` (dBµV), `snr` (dB), and on FM pilot `pil`, blend `bl` (%), multipath `mp`, frequency offset `off` (kHz); seek in progress `sk`, SSB patch loaded `ssb` |
+| `ZZRG;` | query | Raw RDS groups this connection has not been sent yet: `ZZRG e=<epoch> l=<lost> n=<count> AAAABBBBCCCCDDDDEE ...;` (at most 24 per reply). `EE` packs the four 2-bit block error levels, A in the top bits. The epoch changes on every retune, so a client never mixes two stations |
+| `ZZBD;` / `ZZBDnn;` | query / set | Band index into the band table |
+| `ZZST;` / `ZZSTn;` | query / set | Step index: FM 50/100/200 kHz, AM 1/5/9/10/50/100 kHz |
+| `ZZBW;` / `ZZBWn;` | query / set | Bandwidth index for the current mode |
+| `ZZAG;` / `ZZAGnn;` | query / set | 0 = AGC on, 1 = AGC off, 2–35 = attenuation |
+| `ZZSM;` / `ZZSMnn;` | query / set | Soft mute 0–32 dB. AM / SSB only |
+| `ZZSK;` / `ZZSKU;` `ZZSKD;` `ZZSK0;` | query / set | Seek up / down / stop. Not in SSB. Queued, so the reply never waits on the seek; queries keep answering while it runs |
+
+**RDS is now drained completely.** The loop used to pop one group per 90 ms, which is
+the rate groups arrive (11.4/s), so the tuner's 25-group FIFO crept towards overflow.
+And it read nothing at all below SNR 12, which skipped weak but perfectly decodable
+stations. It now reads the FIFO count and drains it every pass. Measured: 11.3
+groups/s, none lost, no duplicates.
+
+### Web UI (PC prototype)
+
+A browser receiver UI, developed on the PC first and to be served by the ESP32 later.
+It drives the radio over **CAT USB**, so switch
+`CAT USB` on in the menu, then run:
+
+```bash
+python3 tools/webui_bridge.py              # open http://localhost:8073
+python3 tools/webui_bridge.py --host 0.0.0.0   # also reachable from a phone on the LAN
+```
+
+Only one program can own the serial port: close rigctld, Flrig or a serial monitor
+first.
+
+The page talks to an HTTP API, not to CAT: `GET /api/bands`, `GET /api/state`,
+`GET /api/rds`, `POST /api/cmd` and an SSE stream at `/events`. That is the interface
+the ESP32 will serve, so the page itself should not change in the port.
+
+- **Controls:** frequency (type it, scroll it, arrow keys, slider), step, seek, band,
+  mode, bandwidth, AGC/attenuation, soft mute, volume, mute. Everything stays in sync
+  with the encoder in both directions.
+- **Signal:** dBµV, S-units on AM/SW, SNR, and on FM pilot, blend, multipath and
+  offset, plus a 60 s history.
+- **RDS, decoded in the browser** (`web/rds.js`) from raw groups: PI (country,
+  coverage, programme reference, RBDS call letters), PTY / PTYN, PS (shown once two
+  passes agree), TP / TA / music-speech / DI flags, RadioText A/B, RT+, clock time,
+  AF list (method A or B; click one to tune it), ECC, language, PIN, TMC id, EON,
+  the ODA directory, long PS, group statistics and a raw group log.
+- The clock time is accepted only from lightly corrected blocks with a plausible date.
+  One wrongly corrected group once decoded as 1959.
+
 ### The FM broadcast band cannot be shown by Flrig
 
 We identify as a Kenwood **TS-480**, an HF + 6 m transceiver covering 30 kHz–60 MHz.
